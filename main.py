@@ -13,6 +13,10 @@ API_HASH = os.environ.get("API_HASH", "")
 SESSION = os.environ.get("SESSION", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+
 user_client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 
@@ -367,5 +371,4 @@ async def main():
     )
 
 if __name__ == '__main__':
-    loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
