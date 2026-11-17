@@ -11,6 +11,7 @@ asyncio.set_event_loop(loop)
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
+from telethon.tl.types import MessageMediaWebPage
 
 # Server Environment Variables
 API_ID = int(os.environ.get("API_ID", "0").strip())
@@ -103,6 +104,13 @@ async def auto_restore_from_cloud():
     except Exception as e:
         print(f"Auto-Restore Error: {e}")
 
+# ---------------- HELPER: CHECK REAL MEDIA VS WEBPAGE PREVIEW ----------------
+def get_real_media(media):
+    """Agar media sirf link ka webpage preview hai to None return karega, Photo/Video hai to media dega"""
+    if media is None or isinstance(media, MessageMediaWebPage):
+        return None
+    return media
+
 # ---------------- EARNKARO SMART BRIDGE CONVERTER ----------------
 async def send_with_retry(func, *args, **kwargs):
     while True:
@@ -116,14 +124,14 @@ async def send_with_retry(func, *args, **kwargs):
 
 async def convert_via_bot(conv_id, message, is_edit=False):
     """EarnKaro se convert karayega aur 'We could not locate an affiliate URL' aane par rok dega"""
+    orig_media = get_real_media(message.media)
     if not conv_id:
-        return message.text, message.media, True
+        return message.text, orig_media, True
         
     raw_msg = message.raw_text or ""
-    # Agar message me link hi nahi hai (jaise 'Deal Over' edit me), to EarnKaro ko bhejne ki zaroorat nahi
     if "http://" not in raw_msg and "https://" not in raw_msg:
         if is_edit:
-            return message.text, message.media, True
+            return message.text, orig_media, True
         else:
             return None, None, False
 
@@ -134,7 +142,6 @@ async def convert_via_bot(conv_id, message, is_edit=False):
             
             lower_resp = (resp.raw_text or "").lower()
             
-            # Exact EarnKaro Error Filter
             blocked_phrases = [
                 "we could not locate an affiliate url",
                 "verify if the seller is available",
@@ -145,23 +152,21 @@ async def convert_via_bot(conv_id, message, is_edit=False):
                 "sorry"
             ]
             
-            # Agar EarnKaro ne ye error message bheja hai YA reply me koi link nahi hai
             if any(phrase in lower_resp for phrase in blocked_phrases) or ("http://" not in lower_resp and "https://" not in lower_resp):
                 if is_edit:
-                    # Agar purana message edit hokar 'Deal Over' hua hai, to original edited text से update kar do
-                    return message.text, message.media, True
+                    return message.text, orig_media, True
                 else:
-                    # Naya message hai aur link convert nahi hua, to bilkul forward MAT karo!
                     print("🚫 Blocked: EarnKaro could not locate an affiliate URL.")
                     return None, None, False
                 
-            final_media = resp.media if resp.media else message.media
+            resp_media = get_real_media(resp.media)
+            final_media = resp_media if resp_media else orig_media
             return resp.text, final_media, True
             
     except Exception as e:
         print(f"Converter Timeout/Skip: {e}")
         if is_edit:
-            return message.text, message.media, True
+            return message.text, orig_media, True
         return None, None, False
 
 # ---------------- QUEUE WORKER (NEW, ALBUM & EDIT) ----------------
@@ -175,11 +180,15 @@ async def queue_worker():
                     conv_text, conv_media, should_send = await convert_via_bot(conv_id, event.message, is_edit=False)
                     
                     if not should_send:
-                        continue # Error message ko skip kar diya!
+                        continue
                     
                     for dest in t_info.get("destinations", []):
                         if conv_id:
-                            sent = await send_with_retry(user_client.send_message, int(dest), conv_text, file=conv_media)
+                            if conv_media:
+                                sent = await send_with_retry(user_client.send_message, int(dest), conv_text, file=conv_media)
+                            else:
+                                # Bina Photo wale Text+Link messages ke liye Fix!
+                                sent = await send_with_retry(user_client.send_message, int(dest), conv_text)
                         else:
                             sent = await send_with_retry(user_client.send_message, int(dest), event.message)
                         if sent:
@@ -215,13 +224,21 @@ async def queue_worker():
                     
                     if should_send:
                         for dest_chat, dest_msg in targets:
-                            await send_with_retry(
-                                user_client.edit_message,
-                                int(dest_chat),
-                                int(dest_msg),
-                                text=conv_text,
-                                file=conv_media
-                            )
+                            if conv_media:
+                                await send_with_retry(
+                                    user_client.edit_message,
+                                    int(dest_chat),
+                                    int(dest_msg),
+                                    text=conv_text,
+                                    file=conv_media
+                                )
+                            else:
+                                await send_with_retry(
+                                    user_client.edit_message,
+                                    int(dest_chat),
+                                    int(dest_msg),
+                                    text=conv_text
+                                )
                             await asyncio.sleep(2.0)
 
         except Exception as e:
