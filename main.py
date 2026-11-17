@@ -49,7 +49,7 @@ def get_mappings(src_chat, src_msg):
     cursor.execute("SELECT dest_chat, dest_msg FROM msg_map WHERE src_chat=? AND src_msg=?", (src_chat, src_msg))
     return cursor.fetchall()
 
-# ---------------- TASK CONFIG & 100% AUTO-RESTORE SYSTEM ----------------
+# ---------------- TASK CONFIG & BULLETPROOF AUTO-RESTORE SYSTEM ----------------
 data = {"tasks": {}, "owner_id": None}
 OWNER_ID = None
 USER_CONNECTED = False
@@ -61,21 +61,46 @@ def save_local():
         json.dump(data, f, indent=4)
 
 async def sync_to_cloud():
+    """Bulletproof Cloud Sync: Saved Messages me hamesha latest task update rahega"""
     save_local()
     if not USER_CONNECTED:
         return
     try:
         backup_str = f"{BACKUP_TAG}\n`{json.dumps(data)}`"
-        async for msg in user_client.iter_messages("me", search=BACKUP_TAG, limit=5):
-            if msg.raw_text.startswith(BACKUP_TAG):
+        found = False
+        async for msg in user_client.iter_messages("me", limit=20):
+            if msg.raw_text and BACKUP_TAG in msg.raw_text:
                 await msg.edit(backup_str)
-                return
-        await user_client.send_message("me", backup_str)
+                found = True
+                break
+        if not found:
+            await user_client.send_message("me", backup_str)
     except Exception as e:
         print(f"Cloud Sync Error: {e}")
 
 async def auto_restore_from_cloud():
+    """Server start hote hi Saved Messages se task dhoondh kar wapas laayega"""
     global data, OWNER_ID
+    
+    # 1. Pehle Cloud (Saved Messages) se check karo (Sabse reliable)
+    if USER_CONNECTED:
+        try:
+            async for msg in user_client.iter_messages("me", limit=30):
+                if msg.raw_text and BACKUP_TAG in msg.raw_text and "`" in msg.raw_text:
+                    parts = msg.raw_text.split("`")
+                    if len(parts) >= 2:
+                        cloud_data = json.loads(parts[1])
+                        if cloud_data.get("tasks"):
+                            data = cloud_data
+                            if data.get("owner_id"):
+                                OWNER_ID = data["owner_id"]
+                            save_local()
+                            print("✅ 100% Data Successfully Restored from Saved Messages!")
+                            return
+        except Exception as e:
+            print(f"Cloud Restore Error: {e}")
+
+    # 2. Agar cloud me na mile toh local file check karo
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
@@ -88,25 +113,8 @@ async def auto_restore_from_cloud():
         except:
             pass
 
-    if not USER_CONNECTED:
-        return
-
-    try:
-        async for msg in user_client.iter_messages("me", search=BACKUP_TAG, limit=5):
-            if msg.raw_text and "`" in msg.raw_text:
-                json_part = msg.raw_text.split("`")[1]
-                data = json.loads(json_part)
-                if data.get("owner_id"):
-                    OWNER_ID = data["owner_id"]
-                save_local()
-                print("✅ 100% Data Restored from Saved Messages!")
-                return
-    except Exception as e:
-        print(f"Auto-Restore Error: {e}")
-
 # ---------------- HELPER: CHECK REAL MEDIA VS WEBPAGE PREVIEW ----------------
 def get_real_media(media):
-    """Agar media sirf link ka webpage preview hai to None return karega, Photo/Video hai to media dega"""
     if media is None or isinstance(media, MessageMediaWebPage):
         return None
     return media
@@ -123,7 +131,6 @@ async def send_with_retry(func, *args, **kwargs):
             return None
 
 async def convert_via_bot(conv_id, message, is_edit=False):
-    """EarnKaro se convert karayega aur 'We could not locate an affiliate URL' aane par rok dega"""
     orig_media = get_real_media(message.media)
     if not conv_id:
         return message.text, orig_media, True
@@ -156,7 +163,6 @@ async def convert_via_bot(conv_id, message, is_edit=False):
                 if is_edit:
                     return message.text, orig_media, True
                 else:
-                    print("🚫 Blocked: EarnKaro could not locate an affiliate URL.")
                     return None, None, False
                 
             resp_media = get_real_media(resp.media)
@@ -187,7 +193,6 @@ async def queue_worker():
                             if conv_media:
                                 sent = await send_with_retry(user_client.send_message, int(dest), conv_text, file=conv_media)
                             else:
-                                # Bina Photo wale Text+Link messages ke liye Fix!
                                 sent = await send_with_retry(user_client.send_message, int(dest), conv_text)
                         else:
                             sent = await send_with_retry(user_client.send_message, int(dest), event.message)
@@ -495,6 +500,7 @@ async def main():
             me = await user_client.get_me()
             OWNER_ID = me.id
             print(f"✅ User Connected! Owner ID: {OWNER_ID}")
+            # Server start hote hi aapka purana Task apne aap wapas le aayega
             await auto_restore_from_cloud()
         else:
             print("❌ WARNING: SESSION String is invalid!")
